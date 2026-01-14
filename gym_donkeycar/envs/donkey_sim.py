@@ -174,6 +174,9 @@ class DonkeyUnitySimHandler(IMesgHandler):
         self.vel_y = 0.0
         self.vel_z = 0.0
         self.lidar = []
+        self.num_steps_low_speed = 0
+        self.min_speed = 1
+        self.num_steps = 0
 
         # car in Unity lefthand coordinate system: roll is Z, pitch is X and yaw is Y
         self.roll = 0.0
@@ -426,6 +429,8 @@ class DonkeyUnitySimHandler(IMesgHandler):
         self.current_lap_time = 0.0
         self.last_lap_time = 0.0
         self.lap_count = 0
+        self.num_steps_low_speed = 0
+        self.num_steps = 0
 
         # car
         self.roll = 0.0
@@ -437,6 +442,7 @@ class DonkeyUnitySimHandler(IMesgHandler):
 
     def take_action(self, action: np.ndarray) -> None:
         self.send_control(action[0], action[1])
+        self.num_steps += 1
 
     def observe(self) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
         while self.last_received == self.time_received:
@@ -487,10 +493,12 @@ class DonkeyUnitySimHandler(IMesgHandler):
         # but only attained on a long straight line
         # max_speed = 10
 
-        if done:
+        if done: # In case of collision, missed checkpoint, episode disqualification, low speed, or exceeded maximum CTE
             return -1.0
 
-        if self.cte > self.max_cte:
+        # Exceeded max CTE - Updated to consider the absolute value
+        # if self.cte > self.max_cte:
+        if math.fabs(self.cte) > self.max_cte:
             return -1.0
 
         # Collision
@@ -602,22 +610,35 @@ class DonkeyUnitySimHandler(IMesgHandler):
         logger.debug("custom ep_over fn set.")
 
     def determine_episode_over(self):
-        # we have a few initial frames on start that are sometimes very large CTE when it's behind
-        # the path just slightly. We ignore those.
-        if math.fabs(self.cte) > 2 * self.max_cte:
-            pass
-        elif math.fabs(self.cte) > self.max_cte:
+        # Removing the following episode-over condition as it contradicts with the standard CTE limit check.
+        # if math.fabs(self.cte) > 2 * self.max_cte:
+        #     pass
+        # Check for exceeding the maximum CTE
+        if math.fabs(self.cte) > self.max_cte:
             logger.debug(f"game over: cte {self.cte}")
             self.over = True
+        # Check for collision    
         elif self.hit != "none":
             logger.debug(f"game over: hit {self.hit}")
             self.over = True
+        # Check for missed checkpoint    
         elif self.missed_checkpoint:
             logger.debug("missed checkpoint")
             self.over = True
+        # Check for episode disqualification    
         elif self.dq:
             logger.debug("disqualified")
             self.over = True
+        # Check for low speed (only if episode is not already over due to one of the above reasons)
+        if not self.over:
+            if abs(self.speed) < self.min_speed and self.num_steps > 100:
+                self.num_steps_low_speed += 1
+                if self.num_steps_low_speed > 20:
+                    logger.debug("game over: low speed")
+                    self.over = True
+            else:
+                # Reset counter when speed is acceptable
+                self.num_steps_low_speed = 0
 
         # Disable reset
         if os.environ.get("RACE") == "True":
